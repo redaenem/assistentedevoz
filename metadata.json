@@ -1,0 +1,6 @@
+{
+  "name": "Comando",
+  "description": "Aplicativo para abrir outros aplicativos por comandos de voz.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
