@@ -94,11 +94,22 @@ class ComandoViewModel(application: Application) : AndroidViewModel(application)
     private var speechRecognizer: SpeechRecognizer? = null
     private val speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "pt-BR")
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
     }
 
     fun startListening() {
+        if (!SpeechRecognizer.isRecognitionAvailable(getApplication())) {
+            _uiState.update { it.copy(
+                error = "Reconhecimento de voz indisponível",
+                isListening = false,
+                recognizedText = ""
+            ) }
+            return
+        }
+
         if (speechRecognizer == null) {
             speechRecognizer = SpeechRecognizer.createSpeechRecognizer(getApplication())
             speechRecognizer?.setRecognitionListener(this)
@@ -151,67 +162,73 @@ class ComandoViewModel(application: Application) : AndroidViewModel(application)
         val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
         if (!matches.isNullOrEmpty()) {
             val text = matches[0]
-            _uiState.update { it.copy(recognizedText = text) }
             processCommand(text)
         }
     }
 
-    override fun onPartialResults(partialResults: Bundle?) {}
+    override fun onPartialResults(partialResults: Bundle?) {
+        val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+        if (!matches.isNullOrEmpty()) {
+            _uiState.update { it.copy(recognizedText = matches[0]) }
+        }
+    }
+    
     override fun onEvent(eventType: Int, params: Bundle?) {}
 
     private fun processCommand(text: String) {
-        val lowerText = text.lowercase(Locale.getDefault())
-        if (lowerText.startsWith("abrir ")) {
-            val appName = lowerText.substring(6).trim()
-            openApp(appName)
+        _uiState.update { it.copy(recognizedText = "Processando...") }
+        val lowerText = text.trim().lowercase(Locale.ROOT)
+        
+        // Match variations of "abrir [app]"
+        val regex = Regex("^(abrir|abra|iniciar|abra o|abrir o)\\s+(.+)")
+        val matchResult = regex.find(lowerText)
+
+        if (matchResult != null) {
+            val rawAppName = matchResult.groupValues[2].trim()
+            val (packageName, formattedName) = when (rawAppName) {
+                "chatgpt", "chat gpt" -> Pair("com.openai.chatgpt", "ChatGPT")
+                "youtube", "you tube" -> Pair("com.google.android.youtube", "YouTube")
+                "instagram", "insta" -> Pair("com.instagram.android", "Instagram")
+                "whatsapp", "zap" -> Pair("com.whatsapp", "WhatsApp")
+                "spotify" -> Pair("com.spotify.music", "Spotify")
+                else -> Pair(null, rawAppName)
+            }
+            
+            _uiState.update { it.copy(recognizedText = text) } // restore original text
+
+            if (packageName != null) {
+                openApp(packageName, formattedName)
+            } else {
+                _uiState.update { it.copy(
+                    error = "Não encontrei esse aplicativo na lista suportada.",
+                    identifiedApp = rawAppName
+                ) }
+            }
         } else {
             _uiState.update { it.copy(
-                error = "Comando não reconhecido. Diga 'abrir [nome do app]'."
+                recognizedText = text,
+                error = "Não consegui entender. Diga 'abrir [aplicativo]'."
             ) }
         }
     }
 
-    private fun openApp(appName: String) {
+    private fun openApp(packageName: String, formattedName: String) {
         val context = getApplication<Application>()
         val pm = context.packageManager
         
-        val intent = Intent(Intent.ACTION_MAIN, null).apply {
-            addCategory(Intent.CATEGORY_LAUNCHER)
-        }
-        val resolveInfos = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+        val launchIntent = pm.getLaunchIntentForPackage(packageName)
         
-        var foundPackage: String? = null
-        var foundAppName: String? = null
-        
-        for (resolveInfo in resolveInfos) {
-            val label = resolveInfo.loadLabel(pm).toString()
-            if (label.equals(appName, ignoreCase = true) || 
-                label.lowercase(Locale.getDefault()).contains(appName)) {
-                foundPackage = resolveInfo.activityInfo.packageName
-                foundAppName = label
-                break
-            }
-        }
-        
-        if (foundPackage != null) {
-            val launchIntent = pm.getLaunchIntentForPackage(foundPackage)
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(launchIntent)
-                _uiState.update { it.copy(
-                    identifiedApp = foundAppName ?: appName,
-                    actionResult = "Aplicativo aberto com sucesso."
-                ) }
-            } else {
-                _uiState.update { it.copy(
-                    identifiedApp = foundAppName ?: appName,
-                    actionResult = "Não foi possível iniciar o aplicativo."
-                ) }
-            }
+        if (launchIntent != null) {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(launchIntent)
+            _uiState.update { it.copy(
+                identifiedApp = formattedName,
+                actionResult = "Aplicativo aberto"
+            ) }
         } else {
              _uiState.update { it.copy(
-                 identifiedApp = "Desconhecido",
-                 actionResult = "Não encontrei esse aplicativo instalado."
+                 identifiedApp = formattedName,
+                 actionResult = "O aplicativo não está instalado."
              ) }
         }
     }
@@ -378,13 +395,9 @@ fun ComandoScreen(
                         .size(128.dp)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.primary)
-                        .clickable {
+                        .clickable(enabled = !uiState.isListening) {
                             if (hasPermission) {
-                                if (uiState.isListening) {
-                                    viewModel.stopListening()
-                                } else {
-                                    viewModel.startListening()
-                                }
+                                viewModel.startListening()
                             } else {
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
@@ -408,24 +421,32 @@ fun ComandoScreen(
                 modifier = Modifier.height(100.dp)
             ) {
                 Text(
-                    text = if (uiState.isListening) "OUVINDO..." else if (uiState.error.isNotEmpty()) "ERRO" else "COMANDO",
+                    text = if (uiState.isListening) "OUVINDO" else if (uiState.error.isNotEmpty()) "ERRO" else "COMANDO",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
                     letterSpacing = 2.sp,
                     color = Color(0xFFCAC4D0)
                 )
                 
+                val displayState = if (!hasPermission) {
+                    "Permissão de microfone necessária"
+                } else if (uiState.error.isNotEmpty()) {
+                    uiState.error 
+                } else if (uiState.recognizedText.isNotEmpty()) {
+                    if (uiState.recognizedText == "Ouvindo..." || uiState.recognizedText == "Processando...") uiState.recognizedText
+                    else "\"${uiState.recognizedText}\""
+                } else {
+                    "\"Toque para falar\""
+                }
+                
                 Text(
-                    text = if (uiState.isListening && uiState.recognizedText.isEmpty()) "" 
-                           else if (uiState.error.isNotEmpty()) uiState.error 
-                           else if (uiState.recognizedText.isNotEmpty()) "\"${uiState.recognizedText}\""
-                           else "\"abrir ...\"",
-                    fontSize = 36.sp,
+                    text = displayState,
+                    fontSize = if (displayState.length > 20 && !displayState.startsWith("\"")) 20.sp else 36.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = (-0.5).sp,
                     color = if (uiState.error.isNotEmpty()) MaterialTheme.colorScheme.error else Color.White,
                     textAlign = TextAlign.Center,
-                    lineHeight = 40.sp,
+                    lineHeight = if (displayState.length > 20) 28.sp else 40.sp,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
